@@ -1,0 +1,63 @@
+#!/bin/bash
+#SBATCH --job-name=lab2_experiments
+#SBATCH --time=00:10:00
+#SBATCH --mem=16G
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=16
+#SBATCH --partition=defq
+
+module load openmpi/4.1.5-gcc-11.2.0-ux65npg
+
+# Create a directory for results so the Python script can find them
+RESULTS_DIR="caas_results"
+mkdir -p "$RESULTS_DIR"
+
+# Compile the files
+gcc -O3 -o baseline_serial baseline_serial.c -lm
+gcc -O3 -pthread -o baseline_pthreads baseline_pthreads.c -lm
+gcc -O3 -fopenmp -o baseline_omp baseline_omp.c -lm
+mpicc -O3 -o task1 task1.c -lm
+mpicc -O3 -fopenmp -o task2 task2.c -lm
+
+# Initialize CSV files
+echo "Task, N, Procs, Threads, T_Serial, T_Parallel, T_Total" > "$RESULTS_DIR/results_baseline_caas.csv"
+echo "Task, N, Procs, Threads, T_Serial, T_Parallel, T_Total" > "$RESULTS_DIR/results_task1_caas.csv"
+echo "Task, N, Procs, Threads, T_Serial, T_Parallel, T_Total" > "$RESULTS_DIR/results_task2_caas.csv"
+
+echo "Starting Baseline Experiments (Serial, PThreads, OpenMP)..."
+for n in $(seq 250000 250000 10000000); do
+    # Run Serial
+    ./baseline_serial $n >> "$RESULTS_DIR/results_baseline_caas.csv"
+    
+    # Run PThreads & OpenMP over 1, 2, 4, 8 threads
+    for t in 1 2 4 8; do
+        # Use srun to explicitly allocate the CPUs, otherwise SLURM cgroups might choke the threads onto 1 core!
+        srun --ntasks=1 --cpus-per-task=$t --exact ./baseline_pthreads $n $t >> "$RESULTS_DIR/results_baseline_caas.csv"
+        srun --ntasks=1 --cpus-per-task=$t --exact ./baseline_omp $n $t >> "$RESULTS_DIR/results_baseline_caas.csv"
+    done
+done
+
+echo "Starting Task 1 Experiments (Open MPI)..."
+for n in $(seq 250000 250000 10000000); do
+    for p in 1 2 4 8; do
+        srun --ntasks=$p --cpus-per-task=1 --exact ./task1 $n | grep "Task1," >> "$RESULTS_DIR/results_task1_caas.csv"
+    done
+done
+
+echo "Starting Task 2 Experiments (Hybrid MPI + OpenMP)..."
+for n in $(seq 250000 250000 10000000); do
+    for p in 1 2 4 8; do
+        for t in 1 2 4 8; do
+            # Prevent asking SLURM for more than our 32-core allocation (e.g. p=8, t=8 = 64 cores)
+            if [ $((p * t)) -le 32 ]; then
+                export OMP_NUM_THREADS=$t
+                srun --ntasks=$p --cpus-per-task=$t --exact ./task2 $n | grep "Task2," >> "$RESULTS_DIR/results_task2_caas.csv"
+            fi
+        done
+    done
+done
+
+echo "CAAS experiments completed! Results saved to the '$RESULTS_DIR' directory."
+
+echo "Generating interactive HTML graphs..."
+python3 generate_html_graphs.py
